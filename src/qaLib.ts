@@ -2,7 +2,7 @@ import "dotenv/config";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import OpenAI from "openai/index.mjs";
+import OpenAI from "openai";
 
 const KNOWLEDGE_PATH = path.join(
   process.cwd(),
@@ -21,8 +21,7 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 type Domain = "resume" | "personal";
 
-export type Citation = { cid: string; text: string };
-export type QAResult = { output: string; used: Citation[] };
+export type QAResult = { output: string };
 
 export type RecordT = {
   id: number;
@@ -34,7 +33,7 @@ export type RecordT = {
 
 export type RetrieveOptions = { domainFilter?: Domain; ensureTerms?: string[] };
 
-function cosine(a: number[], b: number[]): number {
+export function cosine(a: number[], b: number[]): number {
   let dot = 0,
     na = 0,
     nb = 0;
@@ -70,7 +69,7 @@ function ensureTermsForQuestion(q: string): string[] {
   const s = q.toLowerCase();
   const ensures: string[] = [];
   if (s.includes("fynd")) {
-    ensures.push("ratl.ai", "about ratl.ai", "ratl ");
+    ensures.push("ratl.ai", "about ratl.ai");
   }
   return ensures;
 }
@@ -125,7 +124,7 @@ function classifyQuestion(q: string): Domain | "both" | "unknown" {
   return "unknown";
 }
 
-async function retrieve(
+async function retrieveInternal(
   query: string,
   k = 5,
   opts: RetrieveOptions = {}
@@ -168,24 +167,29 @@ async function retrieve(
   return final.map((r, i) => ({ ...r, cid: `C${i + 1}` }));
 }
 
-function buildSystemPrompt(domainHint: Domain | "both" | "unknown") {
-  const scope =
-    domainHint === "personal"
-      ? "personal profile"
-      : domainHint === "resume"
-      ? "professional resume"
-      : "provided context";
-  return (
-    `You are a concise, highly professional assistant for answering questions about the user based on their ${scope}.\n` +
-    "- Use ONLY the provided context for any facts about the user. If information is missing or ambiguous, say so and ask a clarifying question.\n" +
-    "- Write in a formal, clear tone. Return at most two bullet points, each one sentence.\n" +
-    "- Cite supporting snippets using bracketed citations like [C1], [C2], matching the provided context IDs.\n" +
-    "- Do NOT invent dates, titles, employers, or personal details. If unsure, request clarification.\n"
-  );
+export async function retrieveChunks(query: string, k = 5, domain?: Domain) {
+  const opts = domain ? { domainFilter: domain } : {};
+  const results = await retrieveInternal(query, k, opts);
+  return results.map((r) => ({
+    id: r.id,
+    text: r.text,
+    source: r.source,
+    domain: r.domain ?? "resume",
+    score: r.score,
+    cid: r.cid,
+  }));
 }
 
-function formatContext(ctx: Array<{ cid: string; text: string }>): string {
-  return ctx.map((c) => `[${c.cid}] ${c.text}`).join("\n\n");
+export async function indexInfo() {
+  const idx = await loadIndex();
+  const total = idx.length;
+  const byDomain = idx.reduce((acc, r) => {
+    const d = (r.domain || "resume") as Domain;
+    // @ts-ignore dynamic key
+    acc[d] = (acc[d] || 0) + 1;
+    return acc;
+  }, {} as Record<Domain, number>);
+  return { total, byDomain };
 }
 
 export async function answer(question: string, k = 5): Promise<QAResult> {
@@ -193,33 +197,41 @@ export async function answer(question: string, k = 5): Promise<QAResult> {
   const ensure = ensureTermsForQuestion(question);
   let top: Array<RecordT & { score: number; cid: string }> = [];
   if (ensure.length > 0) {
-    top = await retrieve(question, k, { ensureTerms: ensure });
+    top = await retrieveInternal(question, k, { ensureTerms: ensure });
   } else if (domainHint === "personal") {
-    top = await retrieve(question, k, { domainFilter: "personal" });
+    top = await retrieveInternal(question, k, { domainFilter: "personal" });
     if (top.length === 0) {
-      top = await retrieve(question, k);
+      top = await retrieveInternal(question, k);
     }
   } else if (domainHint === "resume") {
-    top = await retrieve(question, k, { domainFilter: "resume" });
+    top = await retrieveInternal(question, k, { domainFilter: "resume" });
   } else {
-    top = await retrieve(question, k);
+    top = await retrieveInternal(question, k);
   }
 
-  const used = top.map((t) => ({ cid: t.cid, text: t.text }));
-  const contextBlock = formatContext(used);
+  // Build a plain context block without citation tags
+  const contextBlock = top.map((t) => t.text).join("\n\n---\n\n");
 
   const styleHint =
     "- Limit the answer to at most two bullet points, each one sentence.\n";
-  const userPrompt = `Context (snippets):\n\n${contextBlock}\n\nUser question: ${question}\n\nInstructions:\n- Answer using only the context for user-specific facts.\n- Include relevant citations [C#] after the sentences they support.\n- If the context does not contain the requested fact, say so and ask for the missing detail.\n${styleHint}`;
+  const userPrompt = `Context (snippets):\n\n${contextBlock}\n\nUser question: ${question}\n\nInstructions:\n- Answer using only the context for user-specific facts.\n- Do not include citations in the answer.\n- If the context does not contain the requested fact, say so and ask for the missing detail.\n${styleHint}`;
 
   const resp = await client.chat.completions.create({
     model: CHAT_MODEL,
     messages: [
-      { role: "system", content: buildSystemPrompt(domainHint) },
+      {
+        role: "system",
+        content:
+          `You are a concise, highly professional assistant for answering questions about the user.\n` +
+          "- Use ONLY the provided context for any facts about the user. If information is missing or ambiguous, say so and ask a clarifying question.\n" +
+          "- Write in a formal, clear tone. Return at most two bullet points, each one sentence.\n" +
+          "- Do NOT include citations or bracketed IDs in the output.\n" +
+          "- Do NOT invent dates, titles, employers, or personal details. If unsure, request clarification.\n",
+      },
       { role: "user", content: userPrompt },
     ],
     temperature: 0.2,
   });
   const output = resp.choices[0]?.message?.content || "";
-  return { output, used };
+  return { output };
 }

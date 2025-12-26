@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import OpenAI from "openai/index.mjs";
+import OpenAI from "openai";
 import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
@@ -93,11 +93,9 @@ async function embedBatch(texts: string[]): Promise<number[][]> {
   return resp.data.map((d) => normalize(d.embedding as number[]));
 }
 
-async function buildIndex() {
+export async function buildIndex() {
   if (!process.env.OPENAI_API_KEY) {
-    throw new Error(
-      "OPENAI_API_KEY not set. Create resume-agent-ts/.env from .env.example"
-    );
+    throw new Error("OPENAI_API_KEY not set. Create .env from .env.example");
   }
 
   const docs = await loadDocuments();
@@ -158,10 +156,13 @@ async function buildIndex() {
     JSON.stringify(records, null, 2),
     "utf8"
   );
-  console.log("Saved index at resume-agent-ts/index/knowledge.index.json");
+  console.log("Saved index at index/knowledge.index.json");
 }
 
-buildIndex().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Allow running this file directly via `npm run index:build`
+if (process.argv[1] && process.argv[1].endsWith("buildIndex.ts")) {
+  buildIndex().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
