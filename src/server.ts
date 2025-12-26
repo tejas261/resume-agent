@@ -53,11 +53,10 @@ app.post("/chat", async (req, res) => {
     const result = await answer(question, TOP_K);
     res.json({
       question,
-      k: TOP_K,
       answer: result.output,
     });
   } catch (err: any) {
-    res.status(500).json({ error: err?.message || "qa failed" });
+    res.status(500).json({ error: err?.message || "Chat API failed" });
   }
 });
 
@@ -95,3 +94,6 @@ async function start() {
 }
 
 start();
+
+// cURL
+// curl -X POST http://localhost:3000/chat -H "Content-Type: application/json" -d '{"question":"What do you work on at Fynd?"}'
